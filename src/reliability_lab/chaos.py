@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import json
 import random
 from pathlib import Path
@@ -22,7 +21,11 @@ def load_queries(path: str | Path = "data/sample_queries.jsonl") -> list[str]:
     return queries
 
 
-def build_gateway(config: LabConfig, provider_overrides: dict[str, float] | None = None) -> ReliabilityGateway:
+def build_gateway(
+    config: LabConfig,
+    provider_overrides: dict[str, float] | None = None,
+    cache_enabled: bool | None = None,
+) -> ReliabilityGateway:
     providers = []
     for p in config.providers:
         fail_rate = provider_overrides.get(p.name, p.fail_rate) if provider_overrides else p.fail_rate
@@ -37,7 +40,8 @@ def build_gateway(config: LabConfig, provider_overrides: dict[str, float] | None
         for p in config.providers
     }
     cache: ResponseCache | SharedRedisCache | None = None
-    if config.cache.enabled:
+    use_cache = config.cache.enabled if cache_enabled is None else cache_enabled
+    if use_cache:
         if config.cache.backend == "redis":
             cache = SharedRedisCache(
                 config.cache.redis_url,
@@ -69,35 +73,61 @@ def calculate_recovery_time_ms(gateway: ReliabilityGateway) -> float | None:
     return sum(recovery_times) / len(recovery_times)
 
 
+def scenario_uses_cache(name: str) -> bool:
+    return "cache" in name
+
+
 def run_scenario(config: LabConfig, queries: list[str], scenario: ScenarioConfig) -> RunMetrics:
     """Run a single named chaos scenario."""
-    gateway = build_gateway(config, scenario.provider_overrides or None)
+    gateway = build_gateway(
+        config,
+        scenario.provider_overrides or None,
+        cache_enabled=config.cache.enabled if scenario.name == "default" else scenario_uses_cache(scenario.name),
+    )
     metrics = RunMetrics()
     request_count = config.load_test.requests
-    for _ in range(request_count):
-        prompt = random.choice(queries)
-        result = gateway.complete(prompt)
-        metrics.total_requests += 1
-        metrics.estimated_cost += result.estimated_cost
-        if result.cache_hit:
-            metrics.cache_hits += 1
-            metrics.estimated_cost_saved += 0.001
-        if result.route == "fallback":
-            metrics.fallback_successes += 1
-            metrics.successful_requests += 1
-        elif result.route == "static_fallback":
-            metrics.static_fallbacks += 1
-            metrics.failed_requests += 1
-        else:
-            metrics.successful_requests += 1
-        if result.latency_ms:
-            metrics.latencies_ms.append(result.latency_ms)
+    try:
+        if isinstance(gateway.cache, SharedRedisCache):
+            gateway.cache.flush()
 
-    metrics.circuit_open_count = sum(
-        1 for breaker in gateway.breakers.values() for t in breaker.transition_log if t["to"] == "open"
-    )
-    metrics.recovery_time_ms = calculate_recovery_time_ms(gateway)
-    return metrics
+        for _ in range(request_count):
+            prompt = random.choice(queries)
+            result = gateway.complete(prompt)
+            metrics.total_requests += 1
+            metrics.estimated_cost += result.estimated_cost
+            if result.cache_hit:
+                metrics.cache_hits += 1
+                metrics.estimated_cost_saved += 0.001
+                metrics.successful_requests += 1
+            elif result.route.startswith("fallback:"):
+                metrics.fallback_successes += 1
+                metrics.successful_requests += 1
+            elif result.route == "static_fallback":
+                metrics.static_fallbacks += 1
+                metrics.failed_requests += 1
+            else:
+                metrics.successful_requests += 1
+            if result.latency_ms:
+                metrics.latencies_ms.append(result.latency_ms)
+
+        metrics.circuit_open_count = sum(
+            1 for breaker in gateway.breakers.values() for t in breaker.transition_log if t["to"] == "open"
+        )
+        metrics.recovery_time_ms = calculate_recovery_time_ms(gateway)
+        return metrics
+    finally:
+        if isinstance(gateway.cache, SharedRedisCache):
+            gateway.cache.close()
+
+
+def evaluate_scenario_result(name: str, metrics: RunMetrics) -> bool:
+    if name == "primary_timeout_100":
+        return metrics.circuit_open_count > 0 and metrics.fallback_success_rate >= 0.9
+    if name == "primary_flaky_50":
+        return metrics.circuit_open_count > 0 and metrics.fallback_successes > 0
+    if name == "all_healthy":
+        return metrics.availability >= 0.95 and metrics.circuit_open_count == 0
+    return metrics.successful_requests > 0
 
 
 def run_simulation(config: LabConfig, queries: list[str]) -> RunMetrics:
@@ -116,9 +146,7 @@ def run_simulation(config: LabConfig, queries: list[str]) -> RunMetrics:
     for scenario in config.scenarios:
         result = run_scenario(config, queries, scenario)
 
-        # TODO(student): Define pass/fail criteria per scenario.
-        # Example: primary_timeout_100 passes if fallback_success_rate > 0.9
-        passed = result.successful_requests > 0
+        passed = evaluate_scenario_result(scenario.name, result)
         combined.scenarios[scenario.name] = "pass" if passed else "fail"
 
         combined.total_requests += result.total_requests

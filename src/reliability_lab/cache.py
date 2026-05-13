@@ -14,6 +14,9 @@ PRIVACY_PATTERNS = re.compile(
     r"\b(balance|password|credit.card|ssn|social.security|user.\d+|account.\d+)\b",
     re.IGNORECASE,
 )
+TOKEN_PATTERNS = re.compile(r"[a-z0-9]+")
+NUMBER_PATTERNS = re.compile(r"\d+")
+HIGH_RISK_CACHE_VALUES = {"privacy", "high"}
 
 
 def _is_uncacheable(query: str) -> bool:
@@ -21,11 +24,24 @@ def _is_uncacheable(query: str) -> bool:
     return bool(PRIVACY_PATTERNS.search(query))
 
 
+def _token_sets(query: str) -> tuple[set[str], set[str]]:
+    tokens = set(TOKEN_PATTERNS.findall(query.lower()))
+    numbers = set(NUMBER_PATTERNS.findall(query.lower()))
+    return tokens - numbers, numbers
+
+
+def _jaccard(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
 def _looks_like_false_hit(query: str, cached_key: str) -> bool:
-    """Return True if query and cached key contain different 4-digit numbers (years, IDs)."""
-    nums_q = set(re.findall(r"\b\d{4}\b", query))
-    nums_c = set(re.findall(r"\b\d{4}\b", cached_key))
-    return bool(nums_q and nums_c and nums_q != nums_c)
+    """Return True when similar text asks about different numeric entities."""
+    text_q, nums_q = _token_sets(query)
+    text_c, nums_c = _token_sets(cached_key)
+    text_score = _jaccard(text_q, text_c)
+    return bool(nums_q and nums_c and nums_q != nums_c and text_score >= 0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +71,11 @@ class ResponseCache:
         self._entries: list[CacheEntry] = []
 
     def get(self, query: str) -> tuple[str | None, float]:
+        if _is_uncacheable(query):
+            return None, 0.0
+
         best_value: str | None = None
+        best_key: str | None = None
         best_score = 0.0
         now = time.time()
         self._entries = [e for e in self._entries if now - e.created_at <= self.ttl_seconds]
@@ -64,12 +84,20 @@ class ResponseCache:
             if score > best_score:
                 best_score = score
                 best_value = entry.value
+                best_key = entry.key
+        if best_key is not None and _looks_like_false_hit(query, best_key):
+            return None, best_score
         if best_score >= self.similarity_threshold:
             return best_value, best_score
         return None, best_score
 
     def set(self, query: str, value: str, metadata: dict[str, str] | None = None) -> None:
-        self._entries.append(CacheEntry(query, value, time.time(), metadata or {}))
+        metadata = metadata or {}
+        if _is_uncacheable(query):
+            return
+        if metadata.get("expected_risk", "").lower() in HIGH_RISK_CACHE_VALUES:
+            return
+        self._entries.append(CacheEntry(query, value, time.time(), metadata))
 
     @staticmethod
     def similarity(a: str, b: str) -> float:
@@ -77,11 +105,20 @@ class ResponseCache:
 
         TODO(student): Improve with embeddings or a deterministic vectorizer.
         """
-        left = set(a.lower().split())
-        right = set(b.lower().split())
-        if not left or not right:
+        normalized_a = a.lower().strip()
+        normalized_b = b.lower().strip()
+        if normalized_a == normalized_b:
+            return 1.0
+        left_text, left_numbers = _token_sets(normalized_a)
+        right_text, right_numbers = _token_sets(normalized_b)
+        text_score = _jaccard(left_text, right_text)
+        if not left_text or not right_text:
             return 0.0
-        return len(left & right) / len(left | right)
+        if left_numbers or right_numbers:
+            if left_numbers != right_numbers:
+                return 0.0 if _looks_like_false_hit(a, b) else text_score * 0.5
+            return min(1.0, text_score + 0.1)
+        return min(1.0, text_score + 0.05)
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +142,7 @@ class SharedRedisCache:
 
     Provided helpers:
         _is_uncacheable(query)          — True if privacy-sensitive
-        _looks_like_false_hit(q, key)   — True if 4-digit numbers differ
+        _looks_like_false_hit(q, key)   — True if similar text has different numbers
         self._query_hash(query)         — deterministic short hash for Redis key
         ResponseCache.similarity(a, b)  — reuse your improved similarity function
     """
@@ -146,7 +183,45 @@ class SharedRedisCache:
         7. Before returning a match, check _looks_like_false_hit(); if true,
            append to self.false_hit_log and return (None, best_score)
         """
-        return None, 0.0
+        if _is_uncacheable(query):
+            return None, 0.0
+
+        exact_key = f"{self.prefix}{self._query_hash(query)}"
+        try:
+            exact_response = self._redis.hget(exact_key, "response")
+            if exact_response is not None:
+                return exact_response, 1.0
+
+            best_query: str | None = None
+            best_response: str | None = None
+            best_score = 0.0
+            for key in self._redis.scan_iter(f"{self.prefix}*"):
+                cached_query = self._redis.hget(key, "query")
+                cached_response = self._redis.hget(key, "response")
+                if cached_query is None or cached_response is None:
+                    continue
+                if _looks_like_false_hit(query, cached_query):
+                    self.false_hit_log.append(
+                        {"query": query, "cached_query": cached_query, "score": 0.0}
+                    )
+                    continue
+                score = ResponseCache.similarity(query, cached_query)
+                if score > best_score:
+                    best_score = score
+                    best_query = cached_query
+                    best_response = cached_response
+
+            if best_query is not None and _looks_like_false_hit(query, best_query):
+                self.false_hit_log.append(
+                    {"query": query, "cached_query": best_query, "score": round(best_score, 4)}
+                )
+                return None, best_score
+
+            if best_score >= self.similarity_threshold:
+                return best_response, best_score
+            return None, best_score
+        except Exception:
+            return None, 0.0
 
     def set(self, query: str, value: str, metadata: dict[str, str] | None = None) -> None:
         """Store a response in Redis with TTL.
@@ -157,7 +232,18 @@ class SharedRedisCache:
         3. self._redis.hset(key, mapping={"query": query, "response": value})
         4. self._redis.expire(key, self.ttl_seconds)
         """
-        pass
+        metadata = metadata or {}
+        if _is_uncacheable(query):
+            return
+        if metadata.get("expected_risk", "").lower() in HIGH_RISK_CACHE_VALUES:
+            return
+
+        key = f"{self.prefix}{self._query_hash(query)}"
+        try:
+            self._redis.hset(key, mapping={"query": query, "response": value})
+            self._redis.expire(key, self.ttl_seconds)
+        except Exception:
+            return
 
     def flush(self) -> None:
         """Remove all entries with this cache prefix (for testing)."""
