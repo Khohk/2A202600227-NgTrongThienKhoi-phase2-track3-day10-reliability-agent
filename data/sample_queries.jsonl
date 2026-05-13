@@ -3,3 +3,28 @@
 {"id":"q3","query":"Explain circuit breaker states in one paragraph.","expected_risk":"technical"}
 {"id":"q4","query":"Give me the current account balance for user 123.","expected_risk":"privacy"}
 {"id":"q5","query":"Summarize the admission FAQ in 5 bullets.","expected_risk":"faq"}
+{"id":"q6","query":"Summarize the refund policy for 2024 in 3 bullets.","expected_risk":"policy"}
+{"id":"q7","query":"Summarize the refund policy for 2026 in 3 bullets.","expected_risk":"policy"}
+{"id":"q8","query":"What is the refund deadline for the spring 2024 intake?","expected_risk":"policy"}
+{"id":"q9","query":"What is the refund deadline for the spring 2026 intake?","expected_risk":"policy"}
+{"id":"q10","query":"Explain circuit breaker states with a simple example.","expected_risk":"technical"}
+{"id":"q11","query":"Describe CLOSED, OPEN, and HALF_OPEN in a circuit breaker.","expected_risk":"technical"}
+{"id":"q12","query":"How does a fallback provider help when the primary model fails?","expected_risk":"technical"}
+{"id":"q13","query":"Why do API calls return 429 and how should I retry them?","expected_risk":"technical"}
+{"id":"q14","query":"What should I do when API calls return 500?","expected_risk":"technical"}
+{"id":"q15","query":"Summarize the admission FAQ in five short bullets.","expected_risk":"faq"}
+{"id":"q16","query":"Give a short summary of the admission FAQ.","expected_risk":"faq"}
+{"id":"q17","query":"List the top 5 admission FAQ answers for new students.","expected_risk":"faq"}
+{"id":"q18","query":"How can caching reduce latency in an LLM gateway?","expected_risk":"technical"}
+{"id":"q19","query":"Why is Redis useful for a shared cache in multi-instance deployments?","expected_risk":"technical"}
+{"id":"q20","query":"Explain the difference between in-memory cache and Redis cache.","expected_risk":"technical"}
+{"id":"q21","query":"Show the password reset steps for account 555.","expected_risk":"privacy"}
+{"id":"q22","query":"What is the current account balance for user 456?","expected_risk":"privacy"}
+{"id":"q23","query":"Summarize tuition payment rules for 2024.","expected_risk":"policy"}
+{"id":"q24","query":"Summarize tuition payment rules for 2025.","expected_risk":"policy"}
+{"id":"q25","query":"Explain how a circuit breaker avoids retry storms.","expected_risk":"technical"}
+{"id":"q26","query":"What metrics should I track for agent reliability?","expected_risk":"technical"}
+{"id":"q27","query":"Which metrics matter most for cache performance?","expected_risk":"technical"}
+{"id":"q28","query":"Summarize the scholarship FAQ in 4 bullets.","expected_risk":"faq"}
+{"id":"q29","query":"Give me the scholarship FAQ summary in four bullets.","expected_risk":"faq"}
+{"id":"q30","query":"What should happen when all providers fail in the gateway?","expected_risk":"technical"}
